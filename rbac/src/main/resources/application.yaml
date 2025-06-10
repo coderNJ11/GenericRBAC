@@ -1,0 +1,9 @@
+server:
+  port: 8080
+
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: http://keycloak-service.keycloak.svc.cluster.local/realms/app-realm/protocol/openid-connect/certs

@@ -1,0 +1,201 @@
+1. Install Keycloak in Kubernetes
+helm repo add bitnami https://charts.bitnami.com/bitnami
+kubectl create namespace keycloak
+helm install keycloak bitnami/keycloak \
+  --set auth.adminUser=admin \
+  --set auth.adminPassword=adminpassword \
+  --namespace keycloak
+
+Access Keycloak Admin Console:
+      kubectl port-forward svc/keycloak -n keycloak 8080:8080
+      Username: admin
+      Password: adminpassword
+
+2. Configure Keycloak Realm and Clients
+Create a Realm:
+In Keycloak Admin Console, click Add Realm (e.g., app-realm).
+Add Roles:
+In Realm Settings → Roles, add roles like admin, user, developer.
+Create a Client:
+Add a client (backend microservice/gateway) in Clients → Create:
+Client ID: app-gateway
+Access Type: Public for frontend, Confidential for backend apps.
+Redirect URIs: For the gateway or app URL (e.g., http://api-gateway/login).
+Add Users:
+Add users for testing in Users → Add User and assign roles on the Role Mappings tab.
+
+
+Step 2: Deploy an API Gateway (e.g., Nginx)
+The API Gateway acts as a reverse proxy between the client and cluster services, authenticating tokens and routing requests to microservices.
+1. Create Dockerfile for Nginx Gateway
+The following Dockerfile sets up Nginx to act as the gateway:
+DOCKERFILE
+
+FROM nginx:alpine
+
+COPY nginx.conf /etc/nginx/nginx.conf
+
+CMD ["nginx", "-g", "daemon off;"]
+
+
+2. Configure Nginx for JWT Authentication
+Create the nginx.conf file:
+events {}
+
+http {
+    upstream app-service {
+        server app-microservice.default.svc.cluster.local:8080; # Internal service in k8s
+    }
+
+    server {
+        listen 80;
+
+        # Validate JWT Token
+        location / {
+            auth_request /validate-token;
+            proxy_pass http://app-service;
+        }
+
+        # Endpoint to validate JWT Token via Authorization Server
+        location /validate-token {
+            internal;
+            proxy_pass http://keycloak-service.keycloak.svc.cluster.local/realms/app-realm/protocol/openid-connect/userinfo;
+            # Keycloak introspection endpoint
+            proxy_set_header Authorization $http_authorization;
+        }
+    }
+}
+
+
+3. Deploy Gateway in Kubernetes
+Package the Nginx gateway:
+
+docker build -t my-nginx-api-gateway:latest .
+docker push <your-docker-repo>/my-nginx-api-gateway:latest
+
+Next, create a Kubernetes Deployment and Service for the gateway:
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+      - name: nginx
+        image: <your-docker-repo>/my-nginx-api-gateway:latest
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+spec:
+  selector:
+    app: api-gateway
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+
+Deploy service
+kubectl apply -f api-gateway.yaml
+
+
+Step 3: Deploy Microservice
+You need a sample microservice that validates the JWT token and applies access control.
+Example Microservice in Spring Boot:
+Add Dependencies in pom.xml:
+
+   <dependency>
+       <groupId>org.springframework.boot</groupId>
+       <artifactId>spring-boot-starter-security</artifactId>
+   </dependency>
+   <dependency>
+       <groupId>org.springframework.boot</groupId>
+       <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+   </dependency>
+
+Configure Token Introspection:
+   Add the application.yml:
+
+      spring:
+        security:
+          oauth2:
+            resourceserver:
+              jwt:
+                jwk-set-uri: http://keycloak-service.keycloak.svc.cluster.local/realms/app-realm/protocol/openid-connect/certs
+
+Add Role-Based Access Control:
+Protect endpoints based on roles in your Jwt token:
+
+   @RestController
+   public class ResourceController {
+
+       @GetMapping("/admin-data")
+       @PreAuthorize("hasRole('ADMIN')")
+       public String getAdminData() {
+           return "Admin Data";
+       }
+
+       @GetMapping("/user-data")
+       @PreAuthorize("hasRole('USER')")
+       public String getUserData() {
+           return "User Data";
+       }
+   }
+Build and Deploy the Microservice in Kubernetes.
+
+Step 4: Configure an Ingress Controller
+Install an ingress controller like NGINX or Traefik to expose internal services (API Gateway).
+
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/master/deploy/static/provider/cloud/deploy.yaml
+
+Create an Ingress Resource for the API Gateway:
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-gateway-ingress
+spec:
+  rules:
+  - host: my-app.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: api-gateway
+            port:
+              number: 80
+
+kubectl apply -f api-gateway-ingress.yaml
+
+
+Update your DNS or /etc/hosts to route my-app.example.com to the Kubernetes cluster’s external IP.
+
+
+Step 5: Enable Caching for JWT Validation
+Use caching for JWT token signature verification (minimize Authorization Server overhead):
+Use tools like Redis to store and retrieve public keys locally.
+Cache JWT key material (.well-known/jwks) for a defined TTL.
+
+JWKSet jwkSet = JWKSet.load(new URL("http://keycloak-service/realm/protocol/openid-connect/certs"));
+Map<String, JWK> keysCache = jwkSet.toPublicJWKSet().getKeyByKeyId();
+
+
+Step 6: Secure All Communications with HTTPS
+Configure an SSL certificate for Ingress (e.g., using Cert-Manager).
+Ensure API Gateway only communicates with services over HTTPS.
+Example Cert-Manager + Let’s Encrypt:
+kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v1.1.1/cert-manager.yaml
+
